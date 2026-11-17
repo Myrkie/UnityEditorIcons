@@ -71,29 +71,25 @@ public class EditorIcons : EditorWindow
             string path = EditorUtility.SaveFilePanel(
                 "Save icon", "", icon_name, "png");
 
-            if (path != null)
+            if (string.IsNullOrEmpty(path)) return;
+            try
             {
-                try
-                {
-#if UNITY_2018
-                    Texture2D outTex = new Texture2D(
-                        tex.width, tex.height,
-                        tex.format, true);
-#else
-                    Texture2D outTex = new Texture2D(
-                        tex.width, tex.height,
-                        tex.format, tex.mipmapCount, true);
-#endif
+                Texture2D outTex = ConvertToReadableTexture(tex);
 
-                    Graphics.CopyTexture(tex, outTex);
+                if (outTex == null)
+                    throw new Exception("Could not convert texture to a readable format.");
 
-                    File.WriteAllBytes(path, outTex.EncodeToPNG());
-                    DestroyImmediate(outTex);
-                }
-                catch (System.Exception e)
-                {
-                    Debug.LogError("Cannot save the icon : " + e.Message);
-                }
+                byte[] pngBytes = outTex.EncodeToPNG();
+
+                if (pngBytes == null || pngBytes.Length == 0)
+                    throw new Exception("PNG encoding returned no data.");
+
+                File.WriteAllBytes(path, pngBytes);
+                DestroyImmediate(outTex);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError("Cannot save the icon : " + e.Message);
             }
         }
         else
@@ -102,24 +98,52 @@ public class EditorIcons : EditorWindow
         }
     }
 
+    Texture2D ConvertToReadableTexture(Texture2D tex)
+    {
+        RenderTexture rt = RenderTexture.GetTemporary(tex.width, tex.height, 0, RenderTextureFormat.ARGB32);
+
+        RenderTexture previous = RenderTexture.active;
+
+        try
+        {
+            Graphics.Blit(tex, rt);
+            RenderTexture.active = rt;
+
+            Texture2D readableTex = new Texture2D(
+                tex.width, tex.height, TextureFormat.RGBA32, false);
+
+            readableTex.ReadPixels(new Rect(0, 0, tex.width, tex.height), 0, 0);
+
+            readableTex.Apply();
+
+            return readableTex;
+        }
+        finally
+        {
+            RenderTexture.active = previous;
+            RenderTexture.ReleaseTemporary(rt);
+        }
+    }
+
     void SaveAllIcons()
     {
         var folderpath = EditorUtility.SaveFolderPanel("", "", "");
         try
         {
+            if (string.IsNullOrWhiteSpace(folderpath))
+                return;
+
             foreach (string icon in iconNames)
             {
                 var split = icon.Split('/').Last();
+                var invalidChars = Path.GetInvalidFileNameChars();
+                var safeFileName = new string(split.Select(c => invalidChars.Contains(c) ? '_' : c).ToArray());
+
                 Texture2D tex = EditorGUIUtility.IconContent(icon).image as Texture2D;
 
                 if (tex == null) continue;
-                if (string.IsNullOrWhiteSpace(folderpath))
-                {
-                    Debug.LogError("Folder path invalid...");
-                    break;
-                }
 
-                var path = folderpath + "//" + $"{split}.png";
+                var path = Path.Combine(folderpath, $"{safeFileName}.png");
 
                 if (File.Exists(path))
                 {
@@ -127,19 +151,20 @@ public class EditorIcons : EditorWindow
                 }
                 else
                 {
-#if UNITY_2018
-                    Texture2D outTex = new Texture2D(
-                        tex.width, tex.height,
-                        tex.format, true);
-#else
-                    Texture2D outTex = new Texture2D(
-                        tex.width, tex.height,
-                        tex.format, tex.mipmapCount, true);
-#endif
+                    Texture2D outTex = ConvertToReadableTexture(tex);
 
-                    Graphics.CopyTexture(tex, outTex);
+                    if (outTex == null)
+                        throw new Exception("Could not convert texture to a readable format: " + icon);
 
-                    File.WriteAllBytes(path, outTex.EncodeToPNG());
+                    byte[] pngBytes = outTex.EncodeToPNG();
+
+                    if (pngBytes == null || pngBytes.Length == 0)
+                    {
+                        DestroyImmediate(outTex);
+                        throw new Exception("PNG encoding returned no data: " + icon);
+                    }
+
+                    File.WriteAllBytes(path, pngBytes);
                     DestroyImmediate(outTex);
                 }
             }
@@ -196,13 +221,10 @@ public class EditorIcons : EditorWindow
 
         iconNames = discoveredIcons
             .Where(x => GetIcon(x) != null)
-            .OrderBy(x => x)  // light and dark icon order is not stable, sort 2 times
+            .OrderBy(x => x, StringComparer.Ordinal)  // light and dark icon order is not stable, sort 2 times
+            // ReSharper disable once MultipleOrderBy
             .OrderBy(x =>     // not ThenBy
-            {
-                if (x.StartsWith("d_", StringComparison.Ordinal))
-                    return x.Substring(2);
-                return x;
-            })
+                x.StartsWith("d_", StringComparison.Ordinal) ? x[2..] : x, StringComparer.Ordinal)
             .ToList();
 
         Resources.UnloadUnusedAssets();
@@ -392,7 +414,7 @@ public class EditorIcons : EditorWindow
 
     static List<string> iconNames = new List<string>();
 
-    void AllTheTEXTURES( ref GUIStyle s, Texture2D t )
+    void AllTheTextures( ref GUIStyle s, Texture2D t )
     {
         s.hover.background = s.onHover.background = s.focused.background = s.onFocused.background = s.active.background = s.onActive.background = s.normal.background = s.onNormal.background = t;
         s.hover.scaledBackgrounds = s.onHover.scaledBackgrounds = s.focused.scaledBackgrounds = s.onFocused.scaledBackgrounds = s.active.scaledBackgrounds = s.onActive.scaledBackgrounds = s.normal.scaledBackgrounds = s.onNormal.scaledBackgrounds = new Texture2D[] { t };
@@ -410,28 +432,30 @@ public class EditorIcons : EditorWindow
     {
         if( iconContentListSmall != null ) return;
 
-        iconButtonStyle = new GUIStyle( EditorStyles.miniButton );
-        iconButtonStyle.margin = new RectOffset(0,0,0,0);
-        iconButtonStyle.fixedHeight = 0;
+        iconButtonStyle = new GUIStyle( EditorStyles.miniButton )
+        {
+            margin = new RectOffset(0,0,0,0),
+            fixedHeight = 0
+        };
 
         iconPreviewBlack = new GUIStyle(iconButtonStyle);
-        AllTheTEXTURES( ref iconPreviewBlack, Texture2DPixel(new Color(0.15f,0.15f,0.15f)));
+        AllTheTextures( ref iconPreviewBlack, Texture2DPixel(new Color(0.15f,0.15f,0.15f)));
 
         iconPreviewWhite = new GUIStyle(iconButtonStyle);
-        AllTheTEXTURES( ref iconPreviewWhite, Texture2DPixel(new Color(0.85f, 0.85f, 0.85f)));
+        AllTheTextures( ref iconPreviewWhite, Texture2DPixel(new Color(0.85f, 0.85f, 0.85f)));
 
         iconContentListSmall = new List<GUIContent>();
         iconContentListBig = new List<GUIContent>();
         iconContentListAll = new List<GUIContent>();
 
-        for (var i = 0; i < iconNames.Count; ++i)
+        foreach (var t in iconNames)
         {
-            GUIContent ico = GetIcon(iconNames[i]);
+            GUIContent ico = GetIcon(t);
 
             if( ico == null )
                 continue;
 
-            ico.tooltip = iconNames[i];
+            ico.tooltip = t;
 
             iconContentListAll.Add(ico);
 
@@ -440,8 +464,5 @@ public class EditorIcons : EditorWindow
             else iconContentListSmall.Add(ico);
         }
     }
-
-    // https://gist.github.com/MattRix/c1f7840ae2419d8eb2ec0695448d4321
-    // https://unitylist.com/p/5c3/Unity-editor-icons
 }
 #endif
